@@ -1,0 +1,22 @@
+[project]
+name = "rag_chatbot"
+version = "0.1.0"
+description = "Reproducible ML project scaffold powered by uv"
+readme = "README.md"
+requires-python = ">= 3.12"
+authors = [{ name = "MalikovM7", email = "email@email.com" }]
+dependencies = [
+    # runtime deps go here, e.g. "pandas>=2.2"
+]
+
+# [tool.ruff]
+# lint.extend-select = ["ALL"]
+
+[tool.black]
+line-length = 100
+extend-exclude = '^(data|reports|models|notebooks)/'
+
+[tool.isort]
+profile = "black" # keeps isort compatible with Black
+line_length = 100
+skip_glob = ["data/**", "reports/**", "models/**", "notebooks/**"]
