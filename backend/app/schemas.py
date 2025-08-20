@@ -1,3 +1,4 @@
+
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -13,6 +14,6 @@ class DocChunk(BaseModel):
     score: float
 
 class ChatChunk(BaseModel):
-    type: str  # "token" | "done" | "error"
-    data: str
+    type: str 
+    data: Optional[str] = None
     sources: Optional[List[DocChunk]] = None

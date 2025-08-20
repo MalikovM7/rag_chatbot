@@ -1,63 +1,82 @@
-import os, json, numpy as np
+
+import os, json
 from typing import List, Tuple
-from .bedrock_client import embed_texts_titan
+import numpy as np
+
 from .deps import get_settings
 
 settings = get_settings()
 
 class Retriever:
     def __init__(self):
-        self.backend = os.getenv("VECTOR_DB", "faiss")
+        self.backend = settings["vector_db"]
         self.index_dir = settings["index_dir"]
         self._load()
 
     def _load(self):
         if self.backend == "faiss":
             import faiss
-            import pathlib
-            self.dim = 1536
-            self.index_path = f"{self.index_dir}/faiss.index"
-            self.meta_path  = f"{self.index_dir}/meta.jsonl"
-            if not pathlib.Path(self.index_path).exists():
-                # empty index
-                self.index = faiss.IndexFlatIP(self.dim)
-                self.meta = []
-            else:
-                self.index = faiss.read_index(self.index_path)
-                with open(self.meta_path, "r", encoding="utf-8") as f:
-                    self.meta = [json.loads(line) for line in f]
+            import pickle, os
+            idx_path = os.path.join(self.index_dir, "index.faiss")
+            meta_path = os.path.join(self.index_dir, "meta.pkl")
+            self.index = faiss.read_index(idx_path)
+            with open(meta_path, "rb") as fh:
+                self.texts = pickle.load(fh)
         else:
-            import chromadb
-            self.chroma = chromadb.PersistentClient(path=self.index_dir)
-            self.coll = self.chroma.get_or_create_collection("docs")
+            raise ValueError(f"Unsupported VECTOR_DB={self.backend}")
 
-    def search(self, query: str, k: int = 4) -> List[Tuple[str, float]]:
-        q_emb = embed_texts_titan([query])[0]
-        if self.backend == "faiss":
-            import faiss, numpy as np
-            if self.index.ntotal == 0 or not self.meta:
-                return []
-            D, I = self.index.search(np.array([q_emb]).astype("float32"), k)
-            out = []
-            for score, idx in zip(D[0].tolist(), I[0].tolist()):
-                m = self.meta[idx]
-                out.append((m["text"], float(score)))
-            return out
-        else:
-            res = self.coll.query(query_embeddings=[q_emb], n_results=k)
-            docs = res.get("documents", [[]])[0]
-            dists = res.get("distances", [[]])[0]
-            return list(zip(docs, [1 - d for d in dists]))  # convert L2 to similarity-ish
+    def _embed(self, texts: List[str]) -> np.ndarray:
+        from .bedrock_client import invoke_once  
+        import boto3, json
+        bedrock = boto3.client("bedrock-runtime", region_name=settings["aws_region"])
+        body = {"inputText": texts, "dimensions": 1536}
+        resp = bedrock.invoke_model(
+            modelId=settings["embedding_model_id"],
+            body=json.dumps(body),
+            accept="application/json",
+            contentType="application/json",
+        )
+        payload = json.loads(resp["body"].read())
+        vecs = [item["embedding"] for item in payload["embeddingResults"]]
+        return np.array(vecs, dtype="float32")
 
-def build_prompt(system_prompt: str, query: str, contexts: List[str]) -> list:
-    ctx_block = "\n\n".join([f"- {c}" for c in contexts]) if contexts else "No context."
-    user = (
-        "Use the following context to answer.\n\n"
-        f"Context:\n{ctx_block}\n\n"
-        f"Question: {query}\n"
-        "If the answer is not in the context, say you don't know."
-    )
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user},
-    ]
+    def search(self, query: str, top_k: int=4) -> List[Tuple[str, float]]:
+        q = self._embed([query])[0]
+        scores, idxs = self.index.search(np.array([q], dtype="float32"), top_k)
+        dists = scores[0]
+        ids = idxs[0]
+        results = []
+        for i, d in zip(ids, dists):
+            if i < 0: 
+                continue
+            text = self.texts[i]
+           
+            sim = float(1.0 / (1.0 + d))
+            results.append((text, sim))
+        return results
+
+def rag_tool_schema():
+    return {
+        "name": "get_knowledge_base_data",
+        "description": "Retrieve top relevant passages for a user question from the enterprise knowledge base.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_query": {"type": "string", "description": "Natural-language question to search with"},
+                "top_k": {"type": "integer", "description": "How many passages to return", "default": 4, "minimum": 1, "maximum": 10}
+            },
+            "required": ["user_query"]
+        }
+    }
+
+def run_rag_tool(user_query: str, top_k: int=4):
+    retriever = Retriever()
+    hits = retriever.search(user_query, top_k=top_k)
+    sources = [{"id": str(i), "text": t, "score": float(s)} for i,(t,s) in enumerate(hits)]
+    return {"sources": sources}
+
+def build_messages(system_prompt: str, user_query: str, sources: List[str]) -> list:
+    ctx = "\n\n".join(f"- {c}" for c in sources) if sources else "No context available."
+    user = (f"Use the context to answer.\n\nContext:\n{ctx}\n\nQuestion: {user_query}\n"
+            "If the answer is not in the context, say you don't know.")
+    return [{"role":"system","content":system_prompt}, {"role":"user","content":user}]
