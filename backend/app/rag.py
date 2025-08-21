@@ -33,7 +33,6 @@ class Retriever:
 
         import boto3
 
-
         bedrock = boto3.client("bedrock-runtime", region_name=settings["aws_region"])
         body = {"inputText": texts, "dimensions": 1536}
         resp = bedrock.invoke_model(
